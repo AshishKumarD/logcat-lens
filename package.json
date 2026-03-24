@@ -1,0 +1,62 @@
+{
+	"name": "logcat-lens",
+	"displayName": "Logcat Lens",
+	"icon": "res/icon.png",
+	"description": "A powerful Android Logcat viewer for VS Code — stream, filter, and search logs without leaving your editor.",
+	"version": "1.0.1",
+	"publisher": "AshishKumarD",
+	"author": "Ashish Kumar",
+	"engines": {
+		"vscode": "^1.90.0"
+	},
+	"categories": [
+		"Debuggers",
+		"Other"
+	],
+	"keywords": [
+		"android",
+		"logcat",
+		"adb",
+		"debug",
+		"logs",
+		"log viewer",
+		"android studio"
+	],
+	"galleryBanner": {
+		"color": "#1a1a2e",
+		"theme": "dark"
+	},
+	"activationEvents": [],
+	"main": "./src/backend/extension.js",
+	"contributes": {
+		"viewsContainers": {
+			"panel": [
+				{
+					"id": "logcat-lens-container",
+					"title": "Logcat Lens",
+					"icon": ""
+				}
+			]
+		},
+		"views": {
+			"logcat-lens-container": [
+				{
+					"id": "logcat-lens-main-view",
+					"type": "webview",
+					"name": "",
+					"contextualTitle": "Logcat Lens",
+					"visibility": "visible",
+					"icon": ""
+				}
+			]
+		}
+	},
+	"scripts": {
+		"lint": "eslint ."
+	},
+	"devDependencies": {
+		"@types/vscode": "^1.90.0",
+		"@types/node": "20.x",
+		"eslint": "^8.57.0"
+	}
+}

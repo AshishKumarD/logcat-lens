@@ -1,0 +1,8 @@
+node_modules/*
+out/*
+
+.local/*
+
+tests/*
+!tests/*.shwebview-debug.log
+*.vsix
