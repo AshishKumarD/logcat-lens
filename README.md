@@ -2,7 +2,7 @@
 
 A powerful Android Logcat viewer for VS Code — stream, filter, and search device logs without leaving your editor.
 
-![Logcat Lens](https://cdn.izanamiarts.com/logcat-lens/main.png)
+![Logcat Lens](res/screenshots/main.png)
 
 ## Features
 
@@ -13,7 +13,7 @@ A powerful Android Logcat viewer for VS Code — stream, filter, and search devi
 - **High performance** — Smooth scrolling even with massive log volumes
 - **Export & copy** — Double-click to copy, export to editor
 
-![Filtering](https://cdn.izanamiarts.com/logcat-lens/filtering.png)
+![Filtering](res/screenshots/filtering.png)
 
 ## Requirements
 
