@@ -15,7 +15,7 @@ class ADBService extends EventEmitter {
 					.split('\n').map(l => l.trim()).filter(l => l);
 
 				const devices = lines.map(line => {
-					const [id, model] = line.match(/(^\w+)|(model:\w+)/g);
+					const [id, model] = line.match(/(^\S+)|(model:\w+)/g);
 					return { id, model: model.split(':').pop(), raw: line };
 				});
 
