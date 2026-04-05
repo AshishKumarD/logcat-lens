@@ -14,10 +14,12 @@ module.exports = class MainViewProvider {
 		this.#extensionURI = context.extensionUri;
 		this.adb = new AdbService();
 		this.adb.on('adbevent', (event) => this.#onMessage(event));
+		this.adb.startDeviceTracking();
 	}
 
 	release() {
 		this.adb.stop();
+		this.adb.stopDeviceTracking();
 	}
 
 	// MESSAGING
@@ -54,6 +56,15 @@ module.exports = class MainViewProvider {
 					await vscode.window.showTextDocument(doc);
 					break;
 				}
+				case 'app-launch':
+					this.adb.launchApp(event.data.deviceId, event.data.packageName).catch(() => {});
+					break;
+				case 'app-force-stop':
+					this.adb.forceStopApp(event.data.deviceId, event.data.packageName).catch(() => {});
+					break;
+				case 'app-clear-data':
+					this.adb.clearAppData(event.data.deviceId, event.data.packageName).catch(() => {});
+					break;
 				case 'devices':
 					this.adb.listDevices()
 						.then(devices => this.#postMessage({ type: 'devices', data: { devices } }))
@@ -63,6 +74,32 @@ module.exports = class MainViewProvider {
 					this.adb.listPackages(event.data.deviceId)
 						.then(packages => this.#postMessage({ type: 'packages', data: { packages } }))
 						.catch(err => vsc.showErrorPopup(err.message || err));
+					break;
+				case 'save-tag-group': {
+					const config = vscode.workspace.getConfiguration('logcatLens');
+					const groups = { ...config.get('tagGroups', {}) };
+					groups[event.data.name] = event.data.tags;
+					await config.update('tagGroups', groups, vscode.ConfigurationTarget.Global);
+					this.#postMessage({ type: 'tag-groups', data: { groups } });
+					break;
+				}
+				case 'load-tag-groups': {
+					const groups = vscode.workspace.getConfiguration('logcatLens').get('tagGroups', {});
+					this.#postMessage({ type: 'tag-groups', data: { groups } });
+					break;
+				}
+				case 'delete-tag-group': {
+					const cfg = vscode.workspace.getConfiguration('logcatLens');
+					const grps = { ...cfg.get('tagGroups', {}) };
+					delete grps[event.data.name];
+					await cfg.update('tagGroups', grps, vscode.ConfigurationTarget.Global);
+					this.#postMessage({ type: 'tag-groups', data: { groups: grps } });
+					break;
+				}
+				case 'package-info':
+					this.adb.getPackageInfo(event.data.deviceId, event.data.packageName)
+						.then(info => this.#postMessage({ type: 'package-info', data: info }))
+						.catch(() => {});
 					break;
 				case 'fetch-tags':
 					this.adb.listTags(event.data.deviceId)
@@ -75,6 +112,20 @@ module.exports = class MainViewProvider {
 					if (!this.#paused) {
 						this.#postMessage({ type: 'log', data: { log: event.data } });
 					}
+					break;
+
+				case 'adb.package-changed':
+					this.#postMessage({ type: 'package-changed', data: event.data });
+					break;
+
+				case 'adb.lifecycle':
+					this.#postMessage({ type: 'lifecycle', data: event.data });
+					break;
+
+				case 'adb.devices-changed':
+					this.adb.listDevices()
+						.then(devices => this.#postMessage({ type: 'devices', data: { devices } }))
+						.catch(() => {});
 					break;
 
 				case 'adb.closed':

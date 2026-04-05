@@ -3,7 +3,7 @@
 	"displayName": "Logcat Lens",
 	"icon": "res/icon.png",
 	"description": "A powerful Android Logcat viewer for VS Code — stream, filter, and search logs without leaving your editor.",
-	"version": "1.0.1",
+	"version": "2.0.0",
 	"publisher": "AshishKumarD",
 	"author": "Ashish Kumar",
 	"engines": {
@@ -53,6 +53,16 @@
 					"icon": ""
 				}
 			]
+		},
+		"configuration": {
+			"title": "Logcat Lens",
+			"properties": {
+				"logcatLens.tagGroups": {
+					"type": "object",
+					"default": {},
+					"description": "Saved tag groups. Keys are group names, values are arrays of tag strings."
+				}
+			}
 		}
 	},
 	"scripts": {

@@ -10,18 +10,44 @@ class ADBService extends EventEmitter {
 			exec('adb devices -l', (error, stdout, stderr) => {
 				if (error) return reject(error);
 
-				// sample: R5CX912W25A            device product:e3qxxx model:SM_S928B device:e3q transport_id:1
 				const lines = stdout.split('List of devices attached').pop().trim()
 					.split('\n').map(l => l.trim()).filter(l => l);
 
 				const devices = lines.map(line => {
-					const [id, model] = line.match(/(^\w+)|(model:\w+)/g);
-					return { id, model: model.split(':').pop(), raw: line };
-				});
+					const matches = line.match(/(^\S+)/);
+					if (!matches) return null;
+					const id = matches[1];
+					const modelMatch = line.match(/model:(\S+)/);
+					const model = modelMatch ? modelMatch[1] : id;
+					const status = line.includes('unauthorized') ? 'unauthorized'
+						: line.includes('offline') ? 'offline' : 'online';
+					return { id, model, status, raw: line };
+				}).filter(Boolean);
 
 				resolve(devices);
 			});
 		});
+	}
+
+	startDeviceTracking() {
+		if (this._trackProcess) return;
+		this._trackProcess = spawn('adb', ['track-devices']);
+		this._trackProcess.stdout.on('data', () => {
+			this.emit('adbevent', { type: 'adb.devices-changed' });
+		});
+		this._trackProcess.on('close', () => {
+			this._trackProcess = null;
+			this._trackRetry = setTimeout(() => this.startDeviceTracking(), 3000);
+		});
+		this._trackProcess.on('error', () => {
+			this._trackProcess = null;
+		});
+	}
+
+	stopDeviceTracking() {
+		clearTimeout(this._trackRetry);
+		this._trackProcess?.kill();
+		this._trackProcess = null;
 	}
 
 	listPackages(deviceId) {
@@ -64,6 +90,65 @@ class ADBService extends EventEmitter {
 		});
 	}
 
+	getAppState(deviceId, packageName) {
+		return new Promise((resolve) => {
+			// Check if process is running
+			exec(`adb -s ${deviceId} shell pidof ${packageName}`, (err1, pidOut) => {
+				const pid = pidOut?.trim();
+				if (!pid) {
+					return resolve({ packageName, state: 'not-running', pid: null });
+				}
+				// Check if it's the foreground app
+				exec(`adb -s ${deviceId} shell "dumpsys activity activities | grep mResumedActivity"`, (err2, actOut) => {
+					const isForeground = actOut?.includes(packageName);
+					resolve({
+						packageName,
+						state: isForeground ? 'foreground' : 'background',
+						pid,
+					});
+				});
+			});
+		});
+	}
+
+	getPackageInfo(deviceId, packageName) {
+		return new Promise((resolve, reject) => {
+			exec(`adb -s ${deviceId} shell dumpsys package ${packageName} | grep -E "versionName|versionCode"`, (error, stdout) => {
+				if (error) return reject(error);
+				const version = stdout.match(/versionName=(\S+)/)?.[1] || 'unknown';
+				const versionCode = stdout.match(/versionCode=(\d+)/)?.[1] || '';
+				resolve({ packageName, version, versionCode });
+			});
+		});
+	}
+
+	launchApp(deviceId, packageName) {
+		return new Promise((resolve, reject) => {
+			exec(`adb -s ${deviceId} shell monkey -p ${packageName} -c android.intent.category.LAUNCHER 1`, (error) => {
+				if (error) return reject(error);
+				resolve();
+			});
+		});
+	}
+
+	forceStopApp(deviceId, packageName) {
+		return new Promise((resolve, reject) => {
+			exec(`adb -s ${deviceId} shell am force-stop ${packageName}`, (error) => {
+				if (error) return reject(error);
+				resolve();
+			});
+		});
+	}
+
+	clearAppData(deviceId, packageName) {
+		return new Promise((resolve, reject) => {
+			exec(`adb -s ${deviceId} shell pm clear ${packageName}`, (error) => {
+				if (error) return reject(error);
+				resolve();
+			});
+		});
+	}
+
 	refreshPidMap(deviceId) {
 		exec(`adb -s ${deviceId} shell ps -A -o PID,NAME`, (error, stdout) => {
 			if (error) return;
@@ -88,8 +173,38 @@ class ADBService extends EventEmitter {
 		this.refreshPidMap(deviceId);
 		this._pidInterval = setInterval(() => this.refreshPidMap(deviceId), 30000);
 
+		// App lifecycle tracking for single-package mode
+		if (packages && packages.length === 1) {
+			const pkg = packages[0];
+			this._lastAppState = null;
+			this._appStateRunning = true;
+
+			const pollLoop = () => {
+				if (!this._appStateRunning) return;
+				this.getAppState(deviceId, pkg).then(state => {
+					if (state.state !== this._lastAppState) {
+						this._lastAppState = state.state;
+						this.emit('adbevent', {
+							type: 'adb.lifecycle',
+							data: { event: state.state, pkg, detail: `${state.state} (PID: ${state.pid || 'none'})` }
+						});
+					}
+					// Schedule next check after a short delay (serialized, no overlap)
+					if (this._appStateRunning) {
+						this._appStateTimeout = setTimeout(pollLoop, 100);
+					}
+				}).catch(() => {
+					if (this._appStateRunning) {
+						this._appStateTimeout = setTimeout(pollLoop, 500);
+					}
+				});
+			};
+			pollLoop();
+		}
+
 		// Always stream everything at Verbose — all filtering is client-side
-		const args = ['-s', deviceId, 'logcat', '*:V'];
+		// -T 1 = only new logs from now, avoids replaying old buffer on stop/start
+		const args = ['-s', deviceId, 'logcat', '-T', '1', '*:V'];
 
 		this.logcatProcess = spawn('adb', args);
 
@@ -127,6 +242,81 @@ class ADBService extends EventEmitter {
 					type: 'adb.log',
 					data: batch[i]
 				});
+
+				// Detect package install/uninstall/update events
+				const tag = batch[i].tag?.trim();
+				if ((tag === 'PackageManager' || tag === 'PackageInstaller') &&
+					/\b(install|uninstall|remove|replace|update)\b/i.test(batch[i].message)) {
+					this.refreshPidMap(deviceId);
+					setTimeout(() => this.refreshPidMap(deviceId), 2000);
+					this.emit('adbevent', {
+						type: 'adb.package-changed',
+						data: { message: batch[i].message, tag }
+					});
+				}
+
+				// Detect app lifecycle events for tracked packages
+				const msg = batch[i].message;
+				const trackedPkgs = this.lastParams?.packages || [];
+				if (trackedPkgs.length > 0) {
+					let lifecycle = null;
+					if (tag === 'ActivityManager') {
+						for (const pkg of trackedPkgs) {
+							if (msg.includes(pkg)) {
+								if (/^Start proc\b/.test(msg)) {
+									lifecycle = { event: 'started', pkg, detail: msg };
+									this.refreshPidMap(deviceId);
+									setTimeout(() => this.refreshPidMap(deviceId), 1500);
+								} else if (/^Displayed\b/.test(msg)) {
+									lifecycle = { event: 'displayed', pkg, detail: msg };
+								} else if (/\bKilling\b/.test(msg)) {
+									lifecycle = { event: 'killed', pkg, detail: msg };
+									this.refreshPidMap(deviceId);
+								} else if (/\bANR in\b/.test(msg)) {
+									lifecycle = { event: 'anr', pkg, detail: msg };
+								} else if (/\bForce stopping\b/.test(msg)) {
+									lifecycle = { event: 'force-stopped', pkg, detail: msg };
+								} else if (/\bProcess .* has died\b/.test(msg)) {
+									lifecycle = { event: 'died', pkg, detail: msg };
+									this.refreshPidMap(deviceId);
+								}
+								break;
+							}
+						}
+					} else if (tag === 'ActivityTaskManager') {
+						for (const pkg of trackedPkgs) {
+							if (msg.includes(pkg)) {
+								if (/\bmovedToFront\b|\btopResumedActivity\b|\bResume\b.*\bActivity\b/.test(msg)) {
+									lifecycle = { event: 'foreground', pkg, detail: msg };
+								} else if (/\bmoveToBack\b|\bPause\b.*\bActivity\b/.test(msg)) {
+									lifecycle = { event: 'background', pkg, detail: msg };
+								}
+								break;
+							}
+						}
+					} else if (tag === 'AndroidRuntime' && /^FATAL EXCEPTION/.test(msg)) {
+						const crashPkg = this.pidMap?.[batch[i].pid];
+						if (crashPkg && trackedPkgs.some(p => crashPkg.includes(p))) {
+							lifecycle = { event: 'crashed', pkg: crashPkg, detail: msg };
+						}
+					}
+					// Also detect resume/pause from the app's own Activity logs
+					if (!lifecycle && trackedPkgs.length === 1) {
+						const appPkg = this.pidMap?.[batch[i].pid];
+						if (appPkg && trackedPkgs.some(p => appPkg.includes(p))) {
+							if (/\bonResume\b/.test(msg)) {
+								lifecycle = { event: 'resumed', pkg: appPkg, detail: `${tag}: ${msg}` };
+							} else if (/\bonPause\b/.test(msg)) {
+								lifecycle = { event: 'paused', pkg: appPkg, detail: `${tag}: ${msg}` };
+							} else if (/\bonStop\b/.test(msg)) {
+								lifecycle = { event: 'stopped', pkg: appPkg, detail: `${tag}: ${msg}` };
+							}
+						}
+					}
+					if (lifecycle) {
+						this.emit('adbevent', { type: 'adb.lifecycle', data: lifecycle });
+					}
+				}
 			}
 		});
 
@@ -151,6 +341,9 @@ class ADBService extends EventEmitter {
 		this.logcatProcess?.kill();
 		this.logcatProcess = null;
 		clearInterval(this._pidInterval);
+		this._appStateRunning = false;
+		clearTimeout(this._appStateTimeout);
+		this._lastAppState = null;
 	}
 
 	async restart(params) {
@@ -159,8 +352,10 @@ class ADBService extends EventEmitter {
 		await this.start(params || this.lastParams);
 	}
 
-	clear() {
-		exec(`adb logcat -c`);
+	clear(deviceId) {
+		const device = deviceId || this.lastParams?.deviceId;
+		if (device) exec(`adb -s ${device} logcat -c`);
+		else exec(`adb logcat -c`);
 	}
 }
 

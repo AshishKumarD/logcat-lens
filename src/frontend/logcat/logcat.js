@@ -21,7 +21,11 @@ class Logcat extends HTMLElementBase {
 	selectedPackages = [];
 	tags = [];
 	knownTags = new Set();
-	selectedLevels = new Set(['V', 'D', 'I', 'W', 'E', 'F']); // All on by default
+	tagGroups = {};
+	activeTagGroup = null; // name of currently loaded group
+	tagGroupExpanded = false; // whether to show individual tags
+	selectedLevels = new Set(['V', 'D', 'I', 'W', 'E', 'F', 'L']); // All on by default
+	searchFilterMode = false;
 
 	// Batching
 	_pendingLogs = [];
@@ -69,6 +73,7 @@ class Logcat extends HTMLElementBase {
 		this.renderLevelChips();
 		this.refreshDevices();
 		this.updateStatus();
+		this.postMessage({ type: 'load-tag-groups' });
 	}
 
 	onMessage(event) {
@@ -88,8 +93,20 @@ class Logcat extends HTMLElementBase {
 			case 'tags':
 				event.data.tags.forEach(t => this.knownTags.add(t));
 				break;
+			case 'tag-groups':
+				this.tagGroups = event.data.groups || {};
+				break;
 			case 'log':
 				if (!this.isPaused) this.queueLogEntry(event.data.log);
+				break;
+			case 'package-changed':
+				this._showPackageEvent(event.data.message);
+				break;
+			case 'lifecycle':
+				this._showLifecycleEvent(event.data);
+				break;
+			case 'package-info':
+				this._showPackageInfo(event.data);
 				break;
 			case 'stop':
 				this.isPlaying = false;
@@ -275,7 +292,7 @@ class Logcat extends HTMLElementBase {
 			}
 
 			// Update content
-			el.className = log.priority + (activeMatchBufIdx === bufIdx ? ' active-match' : '');
+			el.className = log.priority + (log._lifecycle ? ' lifecycle-entry lifecycle-' + log._lifecycle : '') + (activeMatchBufIdx === bufIdx ? ' active-match' : '');
 			el.style.transform = `translateY(${i * this.ROW_HEIGHT}px)`;
 			el.children.length === 0
 				? el.innerHTML = this._entryHTML(log)
@@ -313,8 +330,8 @@ class Logcat extends HTMLElementBase {
 	// ========================
 	// CLIENT-SIDE FILTERING
 	// ========================
-	LEVEL_ORDER = ['V', 'D', 'I', 'W', 'E', 'F'];
-	LEVEL_NAMES = { V: 'Verbose', D: 'Debug', I: 'Info', W: 'Warning', E: 'Error', F: 'Fatal' };
+	LEVEL_ORDER = ['V', 'D', 'I', 'W', 'E', 'F', 'L'];
+	LEVEL_NAMES = { V: 'Verbose', D: 'Debug', I: 'Info', W: 'Warning', E: 'Error', F: 'Fatal', L: 'Logcat Lens' };
 
 	toggleLevel(level) {
 		if (this.selectedLevels.has(level)) {
@@ -330,25 +347,33 @@ class Logcat extends HTMLElementBase {
 	renderLevelChips() {
 		this.levelChips.innerHTML = this.LEVEL_ORDER.map(l => {
 			const active = this.selectedLevels.has(l);
-			return `<span class="level-chip level-${l}${active ? ' active' : ''}" onclick="${this.handle}.toggleLevel('${l}')">${l}</span>`;
+			return `<span class="level-chip level-${l}${active ? ' active' : ''}" data-tooltip="${this.LEVEL_NAMES[l]}" onclick="${this.handle}.toggleLevel('${l}')">${l}</span>`;
 		}).join('');
 	}
 
 	rebuildFilteredIndices() {
 		const hasTags = this.tags.length > 0;
 		const hasPkgs = this.selectedPackages.length > 0;
-		const allLevels = this.selectedLevels.size === 6;
+		const allLevels = this.selectedLevels.size === this.LEVEL_ORDER.length;
 		const hasLevel = !allLevels;
+		const hasSearch = this.searchFilterMode && this.query;
 
-		if (!hasTags && !hasPkgs && !hasLevel) {
+		if (!hasTags && !hasPkgs && !hasLevel && !hasSearch) {
 			this.filteredIndices = null;
 		} else {
 			this.filteredIndices = [];
+			const showL = this.selectedLevels.has('L');
 			for (let i = 0; i < this.buffer.length; i++) {
 				const log = this.buffer[i];
+				// L (Logcat Lens) entries always pass tag/pkg/search filters
+				if (log.priority === 'L') {
+					if (showL) this.filteredIndices.push(i);
+					continue;
+				}
 				if (hasLevel && !this.selectedLevels.has(log.priority)) continue;
 				if (hasTags && !this.tags.includes((log.tag || '').trim())) continue;
 				if (hasPkgs && !this.selectedPackages.some(p => (log.pkg || '').includes(p))) continue;
+				if (hasSearch && !this.matchesQuery(log)) continue;
 				this.filteredIndices.push(i);
 			}
 		}
@@ -395,11 +420,12 @@ class Logcat extends HTMLElementBase {
 		if (!logs.length) return;
 		this._pendingLogs = [];
 
-		const allLevels = this.selectedLevels.size === 6;
+		const allLevels = this.selectedLevels.size === this.LEVEL_ORDER.length;
 		const hasLevel = !allLevels;
 		const hasTags = this.tags.length > 0;
 		const hasPkgs = this.selectedPackages.length > 0;
-		const hasFilter = hasLevel || hasTags || hasPkgs;
+		const hasSearch = this.searchFilterMode && this.query;
+		const hasFilter = hasLevel || hasTags || hasPkgs || hasSearch;
 
 		for (let i = 0; i < logs.length; i++) {
 			const log = logs[i];
@@ -408,10 +434,16 @@ class Logcat extends HTMLElementBase {
 
 			// Update filtered indices
 			if (this.filteredIndices !== null) {
-				let pass = true;
-				if (hasLevel && !this.selectedLevels.has(log.priority)) pass = false;
-				if (hasTags && !this.tags.includes((log.tag || '').trim())) pass = false;
-				if (hasPkgs && !this.selectedPackages.some(p => (log.pkg || '').includes(p))) pass = false;
+				let pass;
+				if (log.priority === 'L') {
+					pass = this.selectedLevels.has('L');
+				} else {
+					pass = true;
+					if (hasLevel && !this.selectedLevels.has(log.priority)) pass = false;
+					if (hasTags && !this.tags.includes((log.tag || '').trim())) pass = false;
+					if (hasPkgs && !this.selectedPackages.some(p => (log.pkg || '').includes(p))) pass = false;
+					if (hasSearch && !this.matchesQuery(log)) pass = false;
+				}
 				if (pass) this.filteredIndices.push(bufIdx);
 			} else if (hasFilter) {
 				// Filters are active but filteredIndices was null (first time) — rebuild
@@ -419,9 +451,11 @@ class Logcat extends HTMLElementBase {
 				return; // rebuildFilteredIndices handles the rest
 			}
 
-			// Update search matches
+			// Update search matches — only for visible (filter-passing) entries
 			if (this.query && this.matchesQuery(log)) {
-				this.matches.push(bufIdx);
+				if (!this.filteredIndices || this.filteredIndices.includes(bufIdx)) {
+					this.matches.push(bufIdx);
+				}
 			}
 		}
 
@@ -439,7 +473,7 @@ class Logcat extends HTMLElementBase {
 				const bufIdx = startIdx + i;
 				if (filterSet && !filterSet.has(bufIdx)) continue;
 				const log = logs[i];
-				html += `<entry class="${log.priority}">${this._entryHTML(log)}</entry>`;
+				html += `<entry class="${log.priority}${log._lifecycle ? ' lifecycle-entry lifecycle-' + log._lifecycle : ''}">${this._entryHTML(log)}</entry>`;
 			}
 			if (html) {
 				this.viewport.insertAdjacentHTML('beforeend', html);
@@ -571,10 +605,19 @@ class Logcat extends HTMLElementBase {
 	}
 
 	setDevices(devices) {
+		const prevValue = this.deviceSelect.value;
 		this.deviceSelect.innerHTML = devices.length
-			? devices.map(d => `<option value="${d.id}">${d.model}</option>`).join('')
+			? devices.map(d => {
+				const status = d.status && d.status !== 'online' ? ` (${d.status})` : '';
+				const disabled = d.status && d.status !== 'online' ? ' disabled' : '';
+				return `<option value="${d.id}"${disabled}>${d.model}${status}</option>`;
+			}).join('')
 			: '<option value="">No devices found</option>';
-		if (devices.length) {
+		// Restore previous selection if still available
+		if (prevValue && [...this.deviceSelect.options].some(o => o.value === prevValue && !o.disabled)) {
+			this.deviceSelect.value = prevValue;
+		}
+		if (devices.length && devices.some(d => d.status === 'online')) {
 			this.fetchPackages();
 			this.fetchTags();
 		}
@@ -600,9 +643,16 @@ class Logcat extends HTMLElementBase {
 				this.appendChild(tip);
 			}
 			tip.textContent = text;
-			tip.style.left = (lastEvent.pageX + 12) + 'px';
-			tip.style.top = (lastEvent.pageY + 16) + 'px';
 			tip.style.display = 'block';
+			// Position tooltip, clamping to stay within viewport
+			const tipW = tip.offsetWidth;
+			const pageW = document.documentElement.clientWidth;
+			let left = lastEvent.pageX + 12;
+			if (left + tipW > pageW - 8) {
+				left = lastEvent.pageX - tipW - 8;
+			}
+			tip.style.left = Math.max(4, left) + 'px';
+			tip.style.top = (lastEvent.pageY + 16) + 'px';
 		};
 
 		const hide = () => {
@@ -707,6 +757,9 @@ class Logcat extends HTMLElementBase {
 		if (!this.selectedPackages.includes(pkg)) {
 			this.selectedPackages.push(pkg);
 			this.renderPackages();
+			// Fetch version info
+			const deviceId = this.deviceSelect.value;
+			if (deviceId) this.postMessage({ type: 'package-info', data: { deviceId, packageName: pkg } });
 		}
 		this.packageInput.value = '';
 		this.hidePackageDropdown();
@@ -716,6 +769,11 @@ class Logcat extends HTMLElementBase {
 		this.packageChips.innerHTML = this.selectedPackages.map((p, i) =>
 			`<span class="pkg-chip">${p.split('.').pop()}<span class="pkg-remove" title="${p}" onclick="${this.handle}.removePackage(${i})">\u00d7</span></span>`
 		).join('');
+		// Hide lifecycle badge if not exactly 1 package
+		if (this.selectedPackages.length !== 1) {
+			this.lifecycleStatus.style.display = 'none';
+			this.lifecycleActions.style.display = 'none';
+		}
 		this.rebuildFilteredIndices();
 	}
 
@@ -726,6 +784,97 @@ class Logcat extends HTMLElementBase {
 
 	hidePackageDropdown() {
 		this.packageDropdown.style.display = 'none';
+	}
+
+	_showPackageEvent(message) {
+		// Briefly show package event in status bar
+		const prev = this.statusText.textContent;
+		this.statusText.textContent = `Package: ${message.substring(0, 60)}`;
+		this.statusText.style.color = 'var(--vscode-editorWarning-foreground, #cca700)';
+		setTimeout(() => {
+			this.statusText.textContent = prev;
+			this.statusText.style.color = '';
+		}, 4000);
+		// Refresh package list
+		this.fetchPackages();
+		// Re-fetch info for selected packages
+		this.selectedPackages.forEach(pkg => {
+			this.postMessage({ type: 'package-info', data: { deviceId: this.deviceSelect.value, packageName: pkg } });
+		});
+	}
+
+	_showLifecycleEvent(data) {
+		// Only show when exactly 1 package is selected
+		if (this.selectedPackages.length !== 1) return;
+
+		const labels = {
+			'started': '▶ App Started',
+			'displayed': '▶ App Displayed',
+			'foreground': '▶ App in Foreground',
+			'resumed': '▶ App Resumed',
+			'paused': '⏸ App Paused',
+			'background': '⏸ App in Background',
+			'not-running': '⏹ App Not Running',
+			'stopped': '⏹ App Stopped',
+			'killed': '✖ App Killed',
+			'died': '✖ App Died',
+			'crashed': '💥 App Crashed',
+			'anr': '⚠ App Not Responding',
+			'force-stopped': '✖ App Force Stopped',
+		};
+		const label = labels[data.event] || data.event;
+
+		// Update status badge
+		this.lifecycleStatus.textContent = label;
+		this.lifecycleStatus.className = `lifecycle-badge lifecycle-${data.event}`;
+		this.lifecycleStatus.title = data.detail;
+		this.lifecycleStatus.style.display = '';
+
+		// Update action buttons (separate element)
+		const actions = {
+			'not-running': `<button class="lifecycle-action" onclick="${this.handle}.appAction('launch')">Launch</button><button class="lifecycle-action" onclick="${this.handle}.appAction('clear-data')">Clear Data</button>`,
+			'killed': `<button class="lifecycle-action" onclick="${this.handle}.appAction('launch')">Launch</button>`,
+			'died': `<button class="lifecycle-action" onclick="${this.handle}.appAction('launch')">Launch</button>`,
+			'crashed': `<button class="lifecycle-action" onclick="${this.handle}.appAction('launch')">Relaunch</button>`,
+			'force-stopped': `<button class="lifecycle-action" onclick="${this.handle}.appAction('launch')">Launch</button><button class="lifecycle-action" onclick="${this.handle}.appAction('clear-data')">Clear Data</button>`,
+			'background': `<button class="lifecycle-action" onclick="${this.handle}.appAction('launch')">Bring to Front</button><button class="lifecycle-action" onclick="${this.handle}.appAction('force-stop')">Force Stop</button>`,
+			'foreground': `<button class="lifecycle-action" onclick="${this.handle}.appAction('force-stop')">Force Stop</button>`,
+		};
+		const actionHtml = actions[data.event] || '';
+		this.lifecycleActions.innerHTML = actionHtml;
+		this.lifecycleActions.style.display = actionHtml ? '' : 'none';
+
+		// Inject a lifecycle banner entry into the log stream
+		const now = new Date();
+		const ts = `${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}.${String(now.getMilliseconds()).padStart(3,'0')}`;
+		this.queueLogEntry({
+			timestamp: ts,
+			pid: '',
+			tid: '',
+			priority: 'L',
+			tag: 'Logcat Lens',
+			message: label,
+			pkg: data.pkg,
+			_lifecycle: data.event,
+		});
+	}
+
+	appAction(action) {
+		if (this.selectedPackages.length !== 1) return;
+		const deviceId = this.deviceSelect.value;
+		const packageName = this.selectedPackages[0];
+		this.postMessage({ type: `app-${action}`, data: { deviceId, packageName } });
+	}
+
+	_showPackageInfo(info) {
+		// Update chip tooltip with version info
+		const chips = this.packageChips.querySelectorAll('.pkg-chip');
+		chips.forEach(chip => {
+			const removeBtn = chip.querySelector('.pkg-remove');
+			if (removeBtn && removeBtn.title === info.packageName) {
+				chip.dataset.tooltip = `${info.packageName} v${info.version}${info.versionCode ? ' (' + info.versionCode + ')' : ''}`;
+			}
+		});
 	}
 
 	// ========================
@@ -764,6 +913,8 @@ class Logcat extends HTMLElementBase {
 				this.hideTagDropdown();
 			} else if (e.key === 'Backspace' && !input.value && this.tags.length) {
 				this.tags.pop();
+				this.activeTagGroup = null;
+				this.tagGroupExpanded = false;
 				this.renderTags();
 			}
 		});
@@ -777,6 +928,11 @@ class Logcat extends HTMLElementBase {
 		document.addEventListener('click', (e) => {
 			if (!input.contains(e.target) && !dropdown.contains(e.target)) {
 				this.hideTagDropdown();
+			}
+			// Close tag group menu when clicking outside
+			const menu = this.tagGroupMenu;
+			if (menu && menu.style.display === 'block' && !menu.contains(e.target) && !e.target.closest('.tag-group-btn')) {
+				menu.style.display = 'none';
 			}
 		});
 	}
@@ -802,6 +958,8 @@ class Logcat extends HTMLElementBase {
 	selectTag(tag) {
 		if (!this.tags.includes(tag)) {
 			this.tags.push(tag);
+			this.activeTagGroup = null;
+			this.tagGroupExpanded = false;
 			this.renderTags();
 		}
 		this.tagTextInput.value = '';
@@ -813,15 +971,113 @@ class Logcat extends HTMLElementBase {
 	}
 
 	renderTags() {
-		this.tagChips.innerHTML = this.tags.map((t, i) =>
-			`<span class="tag-chip">${t}<span class="tag-remove" onclick="${this.handle}.removeTag(${i})">\u00d7</span></span>`
-		).join('');
+		if (this.activeTagGroup && !this.tagGroupExpanded) {
+			// Show group chip with expand/clear
+			this.tagChips.innerHTML = `<span class="tag-chip tag-group-active">
+				<span class="tag-group-name" onclick="${this.handle}.toggleTagGroupExpand()">${this.activeTagGroup} (${this.tags.length})</span>
+				<span class="tag-remove" onclick="${this.handle}.clearActiveTagGroup()">\u00d7</span>
+			</span>`;
+		} else {
+			// Show individual tag chips
+			let prefix = '';
+			if (this.activeTagGroup && this.tagGroupExpanded) {
+				prefix = `<span class="tag-chip tag-group-active">
+					<span class="tag-group-name" onclick="${this.handle}.toggleTagGroupExpand()">${this.activeTagGroup} ▾</span>
+				</span>`;
+			}
+			this.tagChips.innerHTML = prefix + this.tags.map((t, i) =>
+				`<span class="tag-chip">${t}<span class="tag-remove" onclick="${this.handle}.removeTag(${i})">\u00d7</span></span>`
+			).join('');
+		}
 		this.rebuildFilteredIndices();
 	}
 
 	removeTag(index) {
 		this.tags.splice(index, 1);
+		this.activeTagGroup = null;
+		this.tagGroupExpanded = false;
 		this.renderTags();
+	}
+
+	toggleTagGroupExpand() {
+		this.tagGroupExpanded = !this.tagGroupExpanded;
+		this.renderTags();
+	}
+
+	clearActiveTagGroup() {
+		this.tags = [];
+		this.activeTagGroup = null;
+		this.tagGroupExpanded = false;
+		this.renderTags();
+	}
+
+	// TAG GROUPS
+	showTagGroupMenu() {
+		const menu = this.tagGroupMenu;
+		if (menu.style.display === 'block') { menu.style.display = 'none'; return; }
+
+		const names = Object.keys(this.tagGroups);
+		let html = '';
+		if (this.tags.length > 0) {
+			html += `<div class="tag-group-save">
+				<span class="tag-group-save-label">Save current tags as group</span>
+				<input type="text" id="tag-group-name-input" placeholder="Enter group name..." oninput="${this.handle}._updateSaveBtn()">
+				<button id="tag-group-save-btn" onclick="${this.handle}.saveCurrentTagGroup()" disabled>Save Group</button>
+			</div>`;
+		}
+		if (names.length) {
+			html += '<div class="tag-group-list-header">Saved Groups</div><div class="tag-group-list">';
+			names.forEach(name => {
+				const tags = this.tagGroups[name];
+				const esc = name.replace(/'/g, "\\'");
+				html += `<div class="tag-group-item">
+					<div class="tag-group-item-info" onclick="${this.handle}.loadTagGroup('${esc}')">
+						<span class="tag-group-item-name">${name}</span>
+						<span class="tag-group-item-tags">${tags.join(', ')}</span>
+					</div>
+					<span class="tag-group-item-delete" onclick="${this.handle}.deleteTagGroup('${esc}')" title="Delete group">&times;</span>
+				</div>`;
+			});
+			html += '</div>';
+		} else if (this.tags.length === 0) {
+			html += '<div class="tag-group-empty">Add tags first, then save as a group</div>';
+		}
+		menu.innerHTML = html;
+		menu.style.display = 'block';
+		// Focus the input if present
+		const input = this.querySelector('#tag-group-name-input');
+		if (input) setTimeout(() => input.focus(), 50);
+	}
+
+	_updateSaveBtn() {
+		const input = this.querySelector('#tag-group-name-input');
+		const btn = this.querySelector('#tag-group-save-btn');
+		if (btn) btn.disabled = !input?.value?.trim();
+	}
+
+	saveCurrentTagGroup() {
+		const input = this.querySelector('#tag-group-name-input');
+		const name = input?.value?.trim();
+		if (!name || !this.tags.length) return;
+		this.postMessage({ type: 'save-tag-group', data: { name, tags: [...this.tags] } });
+		this.activeTagGroup = name;
+		this.tagGroupExpanded = false;
+		this.renderTags();
+		this.tagGroupMenu.style.display = 'none';
+	}
+
+	loadTagGroup(name) {
+		const group = this.tagGroups[name];
+		if (!group) return;
+		this.tags = [...group];
+		this.activeTagGroup = name;
+		this.tagGroupExpanded = false;
+		this.renderTags();
+		this.tagGroupMenu.style.display = 'none';
+	}
+
+	deleteTagGroup(name) {
+		this.postMessage({ type: 'delete-tag-group', data: { name } });
 	}
 
 	// ========================
@@ -872,9 +1128,15 @@ class Logcat extends HTMLElementBase {
 
 		if (q != this.query) {
 			this.query = q;
+			if (this.searchFilterMode) this.rebuildFilteredIndices();
 			this.matches = [];
-			for (let i = 0; i < this.buffer.length; i++) {
-				if (this.matchesQuery(this.buffer[i], q)) this.matches.push(i);
+			// Search only within currently visible (filtered) entries
+			const count = this.getDisplayCount();
+			for (let i = 0; i < count; i++) {
+				const log = this.getLogAtDisplayIndex(i);
+				if (this.matchesQuery(log, q)) {
+					this.matches.push(this.getBufferIndexForDisplayIndex(i));
+				}
 			}
 			this.currentMatch = -1;
 		}
@@ -893,14 +1155,25 @@ class Logcat extends HTMLElementBase {
 		this.updateSearchUI();
 	}
 
+	toggleSearchFilter() {
+		this.searchFilterMode = !this.searchFilterMode;
+		this.searchFilterBtn.classList.toggle('active', this.searchFilterMode);
+		this.rebuildFilteredIndices();
+	}
+
 	clearSearch() {
 		this.matches = [];
 		this.currentMatch = -1;
 		this.query = '';
 		this.updateSearchUI();
+		if (this.searchFilterMode) this.rebuildFilteredIndices();
 		// Re-render to clear active-match highlights
-		this._invalidateAllRows();
-		this.renderVisibleRows();
+		if (this.softWrap) {
+			this.viewport.querySelectorAll('.active-match').forEach(e => e.classList.remove('active-match'));
+		} else {
+			this._invalidateAllRows();
+			this.renderVisibleRows();
+		}
 	}
 
 	matchesQuery(log, query) {
@@ -917,16 +1190,43 @@ class Logcat extends HTMLElementBase {
 			displayIdx = bufferIndex;
 		}
 
-		// Scroll to that row
-		const targetTop = displayIdx * this.ROW_HEIGHT;
-		const viewHeight = this.logList.clientHeight;
-		this.logList.scrollTop = targetTop - viewHeight / 2 + this.ROW_HEIGHT / 2;
+		if (this.softWrap) {
+			// Ensure entry is in DOM range
+			const domIdx = displayIdx - this._flowStart;
+			if (domIdx < 0 || domIdx >= this.viewport.children.length) {
+				this._rebuildFlowAround(displayIdx);
+			}
+			// Clear previous highlights
+			this.viewport.querySelectorAll('.active-match').forEach(e => e.classList.remove('active-match'));
+			const entry = this.viewport.children[displayIdx - this._flowStart];
+			if (entry) {
+				entry.classList.add('active-match');
+				entry.scrollIntoView({ block: 'center' });
+			}
+		} else {
+			const targetTop = displayIdx * this.ROW_HEIGHT;
+			const viewHeight = this.logList.clientHeight;
+			this.logList.scrollTop = targetTop - viewHeight / 2 + this.ROW_HEIGHT / 2;
+			this._invalidateAllRows();
+			this.renderVisibleRows();
+		}
+
 		this.autoScroll = false;
 		this.updateScrollButtons();
+	}
 
-		// Re-render to show the active-match highlight
-		this._invalidateAllRows();
-		this.renderVisibleRows();
+	_rebuildFlowAround(displayIdx) {
+		const count = this.getDisplayCount();
+		const half = Math.floor(this.SOFT_WRAP_MAX_DOM / 2);
+		this._flowStart = Math.max(0, displayIdx - half);
+		this._flowEnd = Math.min(count, this._flowStart + this.SOFT_WRAP_MAX_DOM);
+		let html = '';
+		for (let i = this._flowStart; i < this._flowEnd; i++) {
+			const log = this.getLogAtDisplayIndex(i);
+			if (!log) continue;
+			html += `<entry class="${log.priority}${log._lifecycle ? ' lifecycle-entry lifecycle-' + log._lifecycle : ''}">${this._entryHTML(log)}</entry>`;
+		}
+		this.viewport.innerHTML = html;
 	}
 
 	updateSearchUI() {
@@ -1028,7 +1328,7 @@ class Logcat extends HTMLElementBase {
 		for (let i = this._flowStart; i < this._flowEnd; i++) {
 			const log = this.getLogAtDisplayIndex(i);
 			if (!log) continue;
-			html += `<entry class="${log.priority}">${this._entryHTML(log)}</entry>`;
+			html += `<entry class="${log.priority}${log._lifecycle ? ' lifecycle-entry lifecycle-' + log._lifecycle : ''}">${this._entryHTML(log)}</entry>`;
 		}
 		this.viewport.innerHTML = html;
 
@@ -1049,7 +1349,7 @@ class Logcat extends HTMLElementBase {
 		for (let i = newStart; i < this._flowStart; i++) {
 			const log = this.getLogAtDisplayIndex(i);
 			if (!log) continue;
-			html += `<entry class="${log.priority}">${this._entryHTML(log)}</entry>`;
+			html += `<entry class="${log.priority}${log._lifecycle ? ' lifecycle-entry lifecycle-' + log._lifecycle : ''}">${this._entryHTML(log)}</entry>`;
 		}
 		this.viewport.insertAdjacentHTML('afterbegin', html);
 		this._flowStart = newStart;
@@ -1084,14 +1384,20 @@ class Logcat extends HTMLElementBase {
 	copyLogLine(event) {
 		const entry = event.target.closest('entry');
 		if (!entry) return;
-		this.postMessage({ type: 'copy', data: { text: entry.textContent } });
+		window.getSelection()?.removeAllRanges();
+		const c = entry.children;
+		const text = `${c[0]?.textContent || ''} ${c[1]?.textContent || ''} ${c[2]?.textContent || ''} ${c[3]?.textContent || ''} ${c[4]?.textContent || ''} ${c[5]?.textContent || ''}`.replace(/\s+/g, ' ').trim();
+		this.postMessage({ type: 'copy', data: { text } });
 	}
 
 	exportLogs() {
-		const text = this.buffer.map(log =>
-			`${log.timestamp} ${log.pid || ''} ${log.tid || ''} ${log.priority} ${log.tag}: ${log.message}`
-		).join('\n');
-		this.postMessage({ type: 'export', data: { logs: text } });
+		const count = this.getDisplayCount();
+		const lines = [];
+		for (let i = 0; i < count; i++) {
+			const log = this.getLogAtDisplayIndex(i);
+			lines.push(`${log.timestamp} ${log.pid || ''} ${log.tid || ''} ${log.priority} ${log.tag}: ${log.message}`);
+		}
+		this.postMessage({ type: 'export', data: { logs: lines.join('\n') } });
 	}
 
 	// ========================
@@ -1121,6 +1427,8 @@ class Logcat extends HTMLElementBase {
 				<status-bar>
 					<span id="status-text">Not Started</span>
 					<button id="status-action-btn" class="ic play" data-tooltip="Start" onclick="${this.handle}.statusAction()"></button>
+					<span id="lifecycle-status" class="lifecycle-badge" style="display:none;"></span>
+					<span id="lifecycle-actions" class="lifecycle-actions" style="display:none;"></span>
 				</status-bar>
 
 				<filter-bar>
@@ -1135,6 +1443,8 @@ class Logcat extends HTMLElementBase {
 						<div id="tag-chips" class="tag-chips"></div>
 						<input type="text" id="tag-text-input" placeholder="Tags" autocomplete="off">
 						<div id="tag-dropdown" class="autocomplete-dropdown" style="display:none;"></div>
+						<button class="ic tag-group-btn" data-tooltip="Tag Groups" onclick="${this.handle}.showTagGroupMenu()"></button>
+						<div id="tag-group-menu" class="tag-group-menu" style="display:none;"></div>
 					</div>
 
 					<div class="filter-group package-group">
@@ -1150,6 +1460,7 @@ class Logcat extends HTMLElementBase {
 						<span id="search-matches"></span>
 						<button id="prev-button" class="ic arrow-up" disabled title="Previous" onclick="${this.handle}.search('prev')"></button>
 						<button id="next-button" class="ic arrow-down" disabled title="Next" onclick="${this.handle}.search('next')"></button>
+						<button id="search-filter-btn" class="ic search-filter" data-tooltip="Filter by Search" onclick="${this.handle}.toggleSearchFilter()"></button>
 					</div>
 				</filter-bar>
 

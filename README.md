@@ -8,10 +8,15 @@ A powerful Android Logcat viewer for VS Code — stream, filter, and search devi
 
 - **Real-time streaming** — Stream logs from any connected device or emulator
 - **Instant filtering** — Toggle log levels, add tag/package filters with autocomplete
-- **Search** — Full-text search with match counter and navigation
+- **Search** — Full-text search with match counter, navigation, and filter mode
 - **Display modes** — Standard, compact, and soft wrap with infinite scroll-back
 - **High performance** — Smooth scrolling even with massive log volumes
-- **Export & copy** — Double-click to copy, export to editor
+- **Export & copy** — Double-click to copy, export filtered logs to editor
+- **App lifecycle tracking** — Real-time app state (Foreground, Background, Killed, Crashed, ANR) with action buttons
+- **Tag groups** — Save and load named groups of tags for quick switching
+- **Device monitoring** — Auto-detect device connect/disconnect with online/offline status
+
+![Lifecycle & Tag Groups](res/screenshots/lifecycle.png)
 
 ![Filtering](res/screenshots/filtering.png)
 
@@ -26,3 +31,5 @@ A powerful Android Logcat viewer for VS Code — stream, filter, and search devi
 2. Select a device and click play to start streaming
 3. Filter by level, tag, or package using the filter bar
 4. Use sidebar buttons to pause, clear, wrap, or export
+5. Select a single package to enable lifecycle tracking and app actions
+6. Save frequently-used tag sets as groups for quick recall
