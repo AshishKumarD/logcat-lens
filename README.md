@@ -41,3 +41,9 @@ You can also set a custom ADB path in **Settings > Logcat Lens > Adb Path**.
 4. Use sidebar buttons to pause, clear, wrap, or export
 5. Select a single package to enable lifecycle tracking and app actions
 6. Save frequently-used tag sets as groups for quick recall
+
+## Contributing
+
+Found a bug or have a feature request? [Open an issue](https://github.com/AshishKumarD/logcat-lens/issues).
+
+Want to contribute? [Submit a pull request](https://github.com/AshishKumarD/logcat-lens/pulls) — all contributions are welcome!
