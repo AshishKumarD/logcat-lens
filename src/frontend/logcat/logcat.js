@@ -71,15 +71,36 @@ class Logcat extends HTMLElementBase {
 		this.initTagInput();
 		this.initColumnResize();
 		this.renderLevelChips();
-		this.refreshDevices();
 		this.updateStatus();
 		this.postMessage({ type: 'load-tag-groups' });
+
+		// Check ADB before doing anything else
+		this.postMessage({ type: 'check-adb' });
+	}
+
+	_setAdbMissing(missing) {
+		this.querySelector('#adb-missing-overlay').style.display = missing ? '' : 'none';
+		this.querySelector('sidebar').style.display = missing ? 'none' : '';
+		this.querySelector('.content').style.display = missing ? 'none' : '';
+		if (missing) {
+			const btn = this.querySelector('#adb-install-btn');
+			btn.disabled = false;
+			btn.textContent = 'Install ADB';
+		}
 	}
 
 	onMessage(event) {
 		event = event.data;
 
 		switch (event.type) {
+			case 'adb-status':
+				if (event.data.available) {
+					this._setAdbMissing(false);
+					this.refreshDevices();
+				} else {
+					this._setAdbMissing(true);
+				}
+				break;
 			case 'devices':
 				this.toggleLoading(false);
 				this.setDevices(event.data.devices);
@@ -1410,6 +1431,20 @@ class Logcat extends HTMLElementBase {
 	render() {
 		return `
 			<loading id="loading-bar" class="progress" style="display: none;"></loading>
+
+			<div id="adb-missing-overlay" class="adb-missing-overlay" style="display:none;">
+				<div class="adb-missing-content">
+					<div class="adb-missing-icon">&#9888;</div>
+					<h3>ADB Not Found</h3>
+					<p>Android Debug Bridge (ADB) is required to stream device logs.</p>
+					<div class="adb-missing-actions">
+						<button id="adb-install-btn" class="adb-btn primary" onclick="${this.handle}.postMessage({type:'install-adb'});this.disabled=true;this.textContent='Installing...';">Install ADB</button>
+						<button class="adb-btn" onclick="${this.handle}.postMessage({type:'open-adb-download'})">Download Page</button>
+						<button class="adb-btn" onclick="${this.handle}.postMessage({type:'open-adb-settings'})">Set Path</button>
+					</div>
+					<p class="adb-missing-hint">Already installed? Set the path in Settings &gt; Logcat Lens &gt; Adb Path</p>
+				</div>
+			</div>
 
 			<sidebar>
 				<button id="pause-play-button" class="ic play" data-tooltip="Pause" onclick="${this.handle}.togglePausePlay()" disabled></button>

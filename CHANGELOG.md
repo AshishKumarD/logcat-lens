@@ -1,3 +1,13 @@
+## 2.1.0
+
+### ADB Auto-Discovery & One-Click Install
+- **Android Studio is not required** — install ADB directly from within VS Code with a single click
+- Automatically finds `adb` from ANDROID_HOME, ANDROID_SDK_ROOT, and common SDK install locations (macOS, Windows, Linux)
+- No more "adb: command not found" when VS Code is launched from the dock/start menu instead of a terminal
+- New `logcatLens.adbPath` setting to manually override the adb binary path
+- Clear "ADB Not Found" screen with Install, Download, and Set Path options when ADB is missing
+- Graceful error handling — if ADB is removed or becomes unavailable mid-session, the install screen is shown instead of cryptic errors
+
 ## 2.0.0
 
 ### App Lifecycle Tracking

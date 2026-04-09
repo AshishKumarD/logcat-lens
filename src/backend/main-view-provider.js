@@ -3,6 +3,7 @@ const vscode = require('vscode');
 const vsc = require('./core/vsc');
 const util = require('./core/utils');
 const AdbService = require('./core/adb-service');
+const { isAdbAvailable, downloadAndInstallAdb, resetAdbCache } = require('./core/adb-service');
 
 module.exports = class MainViewProvider {
 	#view;
@@ -68,7 +69,10 @@ module.exports = class MainViewProvider {
 				case 'devices':
 					this.adb.listDevices()
 						.then(devices => this.#postMessage({ type: 'devices', data: { devices } }))
-						.catch(err => vsc.showErrorPopup(err.message || err));
+						.catch(err => {
+							if (this.#isAdbMissingError(err)) return this.#sendAdbMissing();
+							vsc.showErrorPopup(err.message || err);
+						});
 					break;
 				case 'packages':
 					this.adb.listPackages(event.data.deviceId)
@@ -106,6 +110,20 @@ module.exports = class MainViewProvider {
 						.then(tags => this.#postMessage({ type: 'tags', data: { tags } }))
 						.catch(() => {});
 					break;
+				case 'check-adb':
+					this.#postMessage({ type: 'adb-status', data: { available: isAdbAvailable() } });
+					break;
+				case 'install-adb':
+					downloadAndInstallAdb().then(ok => {
+						this.#postMessage({ type: 'adb-status', data: { available: !!ok } });
+					});
+					break;
+				case 'open-adb-settings':
+					vscode.commands.executeCommand('workbench.action.openSettings', 'logcatLens.adbPath');
+					break;
+				case 'open-adb-download':
+					vscode.env.openExternal(vscode.Uri.parse('https://developer.android.com/tools/releases/platform-tools'));
+					break;
 
 				// ADB EVENTS
 				case 'adb.log':
@@ -125,7 +143,9 @@ module.exports = class MainViewProvider {
 				case 'adb.devices-changed':
 					this.adb.listDevices()
 						.then(devices => this.#postMessage({ type: 'devices', data: { devices } }))
-						.catch(() => {});
+						.catch(err => {
+							if (this.#isAdbMissingError(err)) this.#sendAdbMissing();
+						});
 					break;
 
 				case 'adb.closed':
@@ -133,6 +153,7 @@ module.exports = class MainViewProvider {
 					break;
 
 				case 'adb.error':
+					if (this.#isAdbMissingError(event.data)) return this.#sendAdbMissing();
 					vsc.showErrorPopup(event.data.toString());
 					this.adb.stop();
 					this.#postMessage({ type: 'stop' });
@@ -140,10 +161,22 @@ module.exports = class MainViewProvider {
 			}
 
 		} catch (err) {
+			if (this.#isAdbMissingError(err)) return this.#sendAdbMissing();
 			vsc.showErrorPopup(err.message || err);
 			this.adb.stop();
 			this.#postMessage({ type: 'stop' });
 		}
+	}
+
+	#isAdbMissingError(err) {
+		const msg = (err?.message || err || '').toString().toLowerCase();
+		return msg.includes('not found') || msg.includes('no such file') || msg.includes('enoent');
+	}
+
+	#sendAdbMissing() {
+		resetAdbCache();
+		this.adb.stop();
+		this.#postMessage({ type: 'adb-status', data: { available: false } });
 	}
 
 	#postMessage(message) {

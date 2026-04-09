@@ -22,8 +22,16 @@ A powerful Android Logcat viewer for VS Code — stream, filter, and search devi
 
 ## Requirements
 
-- **ADB** installed and in your system PATH
+- **ADB** (Android Debug Bridge) — the extension will auto-detect it from common locations, or you can install it directly from within VS Code. **Android Studio is not required.**
 - A connected Android device or emulator
+
+### ADB Not Found?
+
+If ADB is not installed, Logcat Lens will prompt you to install it with a single click — no Android Studio needed.
+
+![ADB Install](res/screenshots/adb-install.png)
+
+You can also set a custom ADB path in **Settings > Logcat Lens > Adb Path**.
 
 ## Usage
 

@@ -1,13 +1,192 @@
-const { spawn, exec } = require('child_process');
-const { platform } = require('os');
+const { spawn, exec, execSync } = require('child_process');
+const { platform, homedir } = require('os');
+const { existsSync, mkdirSync, createWriteStream, chmodSync } = require('fs');
+const { join } = require('path');
+const https = require('https');
 const EventEmitter = require('events');
+const vscode = require('vscode');
+
+function findAdb() {
+	// 1. User-configured path takes priority
+	const configured = vscode.workspace.getConfiguration('logcatLens').get('adbPath');
+	if (configured && existsSync(configured)) return configured;
+
+	// 2. ANDROID_HOME / ANDROID_SDK_ROOT env vars
+	const home = homedir();
+	const envDirs = [process.env.ANDROID_HOME, process.env.ANDROID_SDK_ROOT].filter(Boolean);
+	for (const dir of envDirs) {
+		const p = join(dir, 'platform-tools', platform() === 'win32' ? 'adb.exe' : 'adb');
+		if (existsSync(p)) return p;
+	}
+
+	// 3. Common SDK install locations per platform
+	const candidates = platform() === 'win32' ? [
+		join(home, 'AppData', 'Local', 'Android', 'Sdk', 'platform-tools', 'adb.exe'),
+		'C:\\Android\\sdk\\platform-tools\\adb.exe',
+	] : platform() === 'darwin' ? [
+		join(home, 'Library', 'Android', 'sdk', 'platform-tools', 'adb'),
+		'/opt/homebrew/bin/adb',
+		'/usr/local/bin/adb',
+	] : [
+		join(home, 'Android', 'Sdk', 'platform-tools', 'adb'),
+		'/usr/local/bin/adb',
+		'/usr/bin/adb',
+	];
+
+	for (const p of candidates) {
+		if (existsSync(p)) return p;
+	}
+
+	// 4. Check if adb is on PATH (works when launched from terminal)
+	try {
+		const cmd = platform() === 'win32' ? 'where adb' : 'which adb';
+		const result = execSync(cmd, { timeout: 5000 }).toString().trim().split('\n')[0];
+		if (result && existsSync(result)) return result;
+	} catch { /* not on PATH */ }
+
+	// 5. Not found
+	return null;
+}
+
+const PLATFORM_TOOLS_URLS = {
+	darwin: 'https://dl.google.com/android/repository/platform-tools-latest-darwin.zip',
+	linux: 'https://dl.google.com/android/repository/platform-tools-latest-linux.zip',
+	win32: 'https://dl.google.com/android/repository/platform-tools-latest-windows.zip',
+};
+
+function isAdbAvailable() {
+	return findAdb() !== null;
+}
+
+async function downloadAndInstallAdb() {
+	const url = PLATFORM_TOOLS_URLS[platform()];
+	if (!url) {
+		vscode.window.showErrorMessage('Unsupported platform for automatic ADB install.');
+		return false;
+	}
+
+	const home = homedir();
+	const installDir = platform() === 'win32'
+		? join(home, 'AppData', 'Local', 'Android', 'Sdk')
+		: platform() === 'darwin'
+			? join(home, 'Library', 'Android', 'sdk')
+			: join(home, 'Android', 'Sdk');
+	const zipPath = join(installDir, 'platform-tools.zip');
+	const adbBin = join(installDir, 'platform-tools', platform() === 'win32' ? 'adb.exe' : 'adb');
+
+	mkdirSync(installDir, { recursive: true });
+
+	return vscode.window.withProgress({
+		location: vscode.ProgressLocation.Notification,
+		title: 'Logcat Lens: Installing ADB',
+		cancellable: false,
+	}, async (progress) => {
+		progress.report({ message: 'Downloading platform-tools...' });
+
+		await new Promise((resolve, reject) => {
+			const follow = (url) => {
+				https.get(url, (res) => {
+					if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+						return follow(res.headers.location);
+					}
+					if (res.statusCode !== 200) {
+						return reject(new Error(`Download failed (HTTP ${res.statusCode})`));
+					}
+					const total = parseInt(res.headers['content-length'], 10) || 0;
+					let downloaded = 0;
+					const file = createWriteStream(zipPath);
+					res.on('data', (chunk) => {
+						downloaded += chunk.length;
+						if (total) progress.report({ message: `Downloading... ${Math.round(downloaded / total * 100)}%` });
+					});
+					res.pipe(file);
+					file.on('finish', () => file.close(resolve));
+					file.on('error', reject);
+				}).on('error', reject);
+			};
+			follow(url);
+		});
+
+		progress.report({ message: 'Extracting...' });
+		const unzipCmd = platform() === 'win32'
+			? `powershell -command "Expand-Archive -Force '${zipPath}' '${installDir}'"`
+			: platform() === 'darwin'
+				? `ditto -xk "${zipPath}" "${installDir}"`
+				: `unzip -o "${zipPath}" -d "${installDir}"`;
+		try {
+			await new Promise((resolve, reject) => {
+				exec(unzipCmd, (err) => err ? reject(err) : resolve());
+			});
+		} catch (extractErr) {
+			// Linux fallback: try python3 if unzip isn't installed
+			if (platform() === 'linux') {
+				await new Promise((resolve, reject) => {
+					exec(`python3 -c "import zipfile; zipfile.ZipFile('${zipPath}').extractall('${installDir}')"`,
+						(err) => err ? reject(err) : resolve());
+				});
+			} else {
+				throw extractErr;
+			}
+		}
+
+		if (platform() !== 'win32') chmodSync(adbBin, 0o755);
+
+		// Clean up zip
+		try { require('fs').unlinkSync(zipPath); } catch { /* ignore */ }
+
+		// Auto-configure the setting and refresh cached path
+		await vscode.workspace.getConfiguration('logcatLens').update('adbPath', adbBin, vscode.ConfigurationTarget.Global);
+		_adbPath = adbBin;
+		_adbWarningShown = false;
+
+		vscode.window.showInformationMessage(`ADB installed to ${adbBin}`);
+		return true;
+	});
+}
+
+let _adbPath;
+let _adbWarningShown = false;
+function getAdb() {
+	if (!_adbPath) _adbPath = findAdb();
+	if (!_adbPath && !_adbWarningShown) {
+		_adbWarningShown = true;
+		vscode.window.showErrorMessage(
+			'ADB not found. Install it directly, download manually, or set the path.',
+			'Install ADB', 'Download Page', 'Set Path'
+		).then(choice => {
+			if (choice === 'Install ADB') {
+				downloadAndInstallAdb();
+			} else if (choice === 'Download Page') {
+				vscode.env.openExternal(vscode.Uri.parse('https://developer.android.com/tools/releases/platform-tools'));
+			} else if (choice === 'Set Path') {
+				vscode.commands.executeCommand('workbench.action.openSettings', 'logcatLens.adbPath');
+			}
+		});
+	}
+	return _adbPath || 'adb';
+}
+
+// Reset cached path when settings change
+vscode.workspace.onDidChangeConfiguration(e => {
+	if (e.affectsConfiguration('logcatLens.adbPath')) _adbPath = null;
+});
 
 class ADBService extends EventEmitter {
 	logcatProcess;
 
+	_exec(cmd, opts, cb) {
+		if (typeof opts === 'function') { cb = opts; opts = {}; }
+		const adb = getAdb();
+		return exec(cmd.replace(/\badb\b/, `"${adb}"`), opts, cb);
+	}
+
+	_spawn(args) {
+		return spawn(getAdb(), args);
+	}
+
 	listDevices() {
 		return new Promise((resolve, reject) => {
-			exec('adb devices -l', (error, stdout, stderr) => {
+			this._exec('adb devices -l', (error, stdout, stderr) => {
 				if (error) return reject(error);
 
 				const lines = stdout.split('List of devices attached').pop().trim()
@@ -31,7 +210,7 @@ class ADBService extends EventEmitter {
 
 	startDeviceTracking() {
 		if (this._trackProcess) return;
-		this._trackProcess = spawn('adb', ['track-devices']);
+		this._trackProcess = this._spawn(['track-devices']);
 		this._trackProcess.stdout.on('data', () => {
 			this.emit('adbevent', { type: 'adb.devices-changed' });
 		});
@@ -52,7 +231,7 @@ class ADBService extends EventEmitter {
 
 	listPackages(deviceId) {
 		return new Promise((resolve, reject) => {
-			exec(`adb -s ${deviceId} shell pm list packages -3`, (error, stdout, stderr) => {
+			this._exec(`adb -s ${deviceId} shell pm list packages -3`, (error, stdout, stderr) => {
 				if (error) return reject(error);
 				const packages = stdout.split('\n')
 					.map(l => l.replace('package:', '').trim())
@@ -65,7 +244,7 @@ class ADBService extends EventEmitter {
 
 	listTags(deviceId) {
 		return new Promise((resolve, reject) => {
-			exec(`adb -s ${deviceId} logcat -d -v tag`, { maxBuffer: 10 * 1024 * 1024 }, (error, stdout) => {
+			this._exec(`adb -s ${deviceId} logcat -d -v tag`, { maxBuffer: 10 * 1024 * 1024 }, (error, stdout) => {
 				if (error) return reject(error);
 				const tags = new Set();
 				stdout.split('\n').forEach(line => {
@@ -80,7 +259,7 @@ class ADBService extends EventEmitter {
 	getUID(deviceId, packageName) {
 		return new Promise((resolve, reject) => {
 			const filter = platform() == 'win32' ? 'FINDSTR' : 'grep';
-			exec(`adb -s ${deviceId} shell dumpsys package ${packageName} | ${filter} uid`, (error, stdout, stderr) => {
+			this._exec(`adb -s ${deviceId} shell dumpsys package ${packageName} | ${filter} uid`, (error, stdout, stderr) => {
 				if (error) return reject(error);
 
 				// sample: uid=10520 gids=[] type=0 prot=signature
@@ -93,13 +272,13 @@ class ADBService extends EventEmitter {
 	getAppState(deviceId, packageName) {
 		return new Promise((resolve) => {
 			// Check if process is running
-			exec(`adb -s ${deviceId} shell pidof ${packageName}`, (err1, pidOut) => {
+			this._exec(`adb -s ${deviceId} shell pidof ${packageName}`, (err1, pidOut) => {
 				const pid = pidOut?.trim();
 				if (!pid) {
 					return resolve({ packageName, state: 'not-running', pid: null });
 				}
 				// Check if it's the foreground app
-				exec(`adb -s ${deviceId} shell "dumpsys activity activities | grep mResumedActivity"`, (err2, actOut) => {
+				this._exec(`adb -s ${deviceId} shell "dumpsys activity activities | grep mResumedActivity"`, (err2, actOut) => {
 					const isForeground = actOut?.includes(packageName);
 					resolve({
 						packageName,
@@ -113,7 +292,7 @@ class ADBService extends EventEmitter {
 
 	getPackageInfo(deviceId, packageName) {
 		return new Promise((resolve, reject) => {
-			exec(`adb -s ${deviceId} shell dumpsys package ${packageName} | grep -E "versionName|versionCode"`, (error, stdout) => {
+			this._exec(`adb -s ${deviceId} shell dumpsys package ${packageName} | grep -E "versionName|versionCode"`, (error, stdout) => {
 				if (error) return reject(error);
 				const version = stdout.match(/versionName=(\S+)/)?.[1] || 'unknown';
 				const versionCode = stdout.match(/versionCode=(\d+)/)?.[1] || '';
@@ -124,7 +303,7 @@ class ADBService extends EventEmitter {
 
 	launchApp(deviceId, packageName) {
 		return new Promise((resolve, reject) => {
-			exec(`adb -s ${deviceId} shell monkey -p ${packageName} -c android.intent.category.LAUNCHER 1`, (error) => {
+			this._exec(`adb -s ${deviceId} shell monkey -p ${packageName} -c android.intent.category.LAUNCHER 1`, (error) => {
 				if (error) return reject(error);
 				resolve();
 			});
@@ -133,7 +312,7 @@ class ADBService extends EventEmitter {
 
 	forceStopApp(deviceId, packageName) {
 		return new Promise((resolve, reject) => {
-			exec(`adb -s ${deviceId} shell am force-stop ${packageName}`, (error) => {
+			this._exec(`adb -s ${deviceId} shell am force-stop ${packageName}`, (error) => {
 				if (error) return reject(error);
 				resolve();
 			});
@@ -142,7 +321,7 @@ class ADBService extends EventEmitter {
 
 	clearAppData(deviceId, packageName) {
 		return new Promise((resolve, reject) => {
-			exec(`adb -s ${deviceId} shell pm clear ${packageName}`, (error) => {
+			this._exec(`adb -s ${deviceId} shell pm clear ${packageName}`, (error) => {
 				if (error) return reject(error);
 				resolve();
 			});
@@ -150,7 +329,7 @@ class ADBService extends EventEmitter {
 	}
 
 	refreshPidMap(deviceId) {
-		exec(`adb -s ${deviceId} shell ps -A -o PID,NAME`, (error, stdout) => {
+		this._exec(`adb -s ${deviceId} shell ps -A -o PID,NAME`, (error, stdout) => {
 			if (error) return;
 			this.pidMap = {};
 			stdout.split('\n').forEach(line => {
@@ -206,7 +385,7 @@ class ADBService extends EventEmitter {
 		// -T 1 = only new logs from now, avoids replaying old buffer on stop/start
 		const args = ['-s', deviceId, 'logcat', '-T', '1', '*:V'];
 
-		this.logcatProcess = spawn('adb', args);
+		this.logcatProcess = this._spawn(args);
 
 		// Buffer partial lines across data chunks
 		let lineBuffer = '';
@@ -354,9 +533,12 @@ class ADBService extends EventEmitter {
 
 	clear(deviceId) {
 		const device = deviceId || this.lastParams?.deviceId;
-		if (device) exec(`adb -s ${device} logcat -c`);
-		else exec(`adb logcat -c`);
+		if (device) this._exec(`adb -s ${device} logcat -c`);
+		else this._exec(`adb logcat -c`);
 	}
 }
 
 module.exports = ADBService;
+module.exports.isAdbAvailable = isAdbAvailable;
+module.exports.downloadAndInstallAdb = downloadAndInstallAdb;
+module.exports.resetAdbCache = () => { _adbPath = null; _adbWarningShown = false; };
