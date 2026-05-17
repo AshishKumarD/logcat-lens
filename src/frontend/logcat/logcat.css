@@ -660,6 +660,68 @@ logcat-lens {
 			}
 		}
 
+		entry message a.log-link {
+			color: #4ea1ff;
+			text-decoration: underline;
+			cursor: pointer;
+		}
+		entry message a.log-link:hover {
+			color: #82bcff;
+		}
+
+		entry message .log-binary-chip,
+		entry message .log-json-chip {
+			display: inline-block;
+			padding: 0 6px;
+			margin: 0 2px;
+			border-radius: 3px;
+			cursor: pointer;
+			font-size: 0.9em;
+			user-select: none;
+			vertical-align: baseline;
+		}
+		entry message .log-binary-chip {
+			background: rgba(120, 180, 255, 0.18);
+			color: #9ec9ff;
+			border: 1px solid rgba(120, 180, 255, 0.35);
+		}
+		entry message .log-binary-chip:hover {
+			background: rgba(120, 180, 255, 0.32);
+		}
+		entry message .log-media-inline {
+			display: inline-flex;
+			align-items: center;
+			vertical-align: middle;
+			margin: 0 4px;
+		}
+		entry message .log-media-inline img {
+			max-height: 16px;
+			width: auto;
+			border-radius: 2px;
+			background: repeating-conic-gradient(#2a2a2a 0% 25%, #1e1e1e 0% 50%) 50% / 8px 8px;
+		}
+		entry message .log-media-inline audio,
+		entry message .log-media-inline video {
+			height: 18px;
+			max-width: 240px;
+		}
+		&.soft-wrap entry message .log-media-inline img {
+			max-height: 200px;
+			max-width: 100%;
+		}
+		&.soft-wrap entry message .log-media-inline video {
+			height: auto;
+			max-height: 240px;
+			max-width: 100%;
+		}
+		entry.selected {
+			background: rgba(80, 140, 220, 0.18) !important;
+			outline: 1px solid rgba(120, 180, 255, 0.45);
+			outline-offset: -1px;
+		}
+
+
+
 		/* Compact mode — hide pkg, tag & pid */
 		&.compact entry pkg,
 		&.compact entry tag,
@@ -714,6 +776,117 @@ logcat-lens {
 			flex: 1 1 0;
 			min-width: 100px;
 		}
+	}
+
+	/* LOG BODY + DETAIL PANE */
+	.log-body {
+		flex: 1;
+		display: flex;
+		flex-direction: row;
+		min-height: 0;
+		overflow: hidden;
+	}
+	.log-body > main {
+		flex: 1;
+		min-width: 0;
+	}
+	.log-detail-pane {
+		position: relative;
+		width: 420px;
+		min-width: 220px;
+		max-width: 80%;
+		border-left: 1px solid var(--vscode-panel-border, #444);
+		background: var(--vscode-editor-background, #1e1e1e);
+		display: flex;
+		flex-direction: column;
+		flex-shrink: 0;
+	}
+	.log-detail-resize {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		left: -3px;
+		width: 6px;
+		cursor: ew-resize;
+		z-index: 2;
+	}
+	.log-detail-resize:hover {
+		background: rgba(120, 180, 255, 0.25);
+	}
+	.log-detail-header {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 6px 10px;
+		border-bottom: 1px solid var(--vscode-panel-border, #444);
+		background: var(--vscode-editorWidget-background, #252526);
+		flex-shrink: 0;
+	}
+	#log-detail-title {
+		flex: 1;
+		color: var(--vscode-foreground, #ccc);
+		font-size: 0.9em;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.log-detail-btn {
+		background: transparent;
+		border: 1px solid var(--vscode-panel-border, #555);
+		color: var(--vscode-foreground, #ccc);
+		padding: 2px 9px;
+		border-radius: 3px;
+		cursor: pointer;
+		font-size: 0.85em;
+	}
+	.log-detail-btn:hover {
+		background: var(--vscode-button-hoverBackground, #2a2d2e);
+	}
+	.log-detail-btn.ic-only {
+		width: 24px;
+		height: 22px;
+		padding: 0;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 14px;
+		line-height: 1;
+	}
+	.log-detail-body {
+		flex: 1;
+		overflow: auto;
+		padding: 10px 12px;
+		font-family: var(--vscode-editor-font-family, monospace);
+		font-size: 12px;
+		color: var(--vscode-foreground, #ccc);
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
+	.log-detail-body pre.log-detail-json {
+		margin: 4px 0;
+		padding: 8px 10px;
+		background: rgba(120, 180, 255, 0.06);
+		border-left: 2px solid rgba(120, 180, 255, 0.4);
+		border-radius: 0 3px 3px 0;
+		color: var(--vscode-foreground, #d4d4d4);
+		white-space: pre;
+		overflow-x: auto;
+	}
+	.log-detail-body .log-binary-chip {
+		display: inline-block;
+		margin: 4px 0;
+	}
+	.log-detail-body .log-detail-img,
+	.log-detail-body .log-detail-video {
+		max-width: 100%;
+		max-height: 60vh;
+		display: block;
+		margin: 0 auto;
+		background: repeating-conic-gradient(#2a2a2a 0% 25%, #1e1e1e 0% 50%) 50% / 16px 16px;
+	}
+	.log-detail-body audio {
+		width: 100%;
+		margin-top: 8px;
 	}
 
 	/* ICONS */

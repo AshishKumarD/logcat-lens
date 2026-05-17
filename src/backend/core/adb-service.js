@@ -321,8 +321,15 @@ class ADBService extends EventEmitter {
 
 	clearAppData(deviceId, packageName) {
 		return new Promise((resolve, reject) => {
-			this._exec(`adb -s ${deviceId} shell pm clear ${packageName}`, (error) => {
-				if (error) return reject(error);
+			this._exec(`adb -s ${deviceId} shell pm clear ${packageName}`, (error, stdout, stderr) => {
+				const out = `${stdout || ''}\n${stderr || ''}`;
+				// `pm clear` exits 0 even on failure — it prints "Failed" on stdout.
+				if (error || !/^\s*Success/m.test(out)) {
+					const err = new Error(out.trim() || (error && error.message) || 'pm clear failed');
+					err.stdout = stdout;
+					err.stderr = stderr;
+					return reject(err);
+				}
 				resolve();
 			});
 		});
@@ -353,33 +360,7 @@ class ADBService extends EventEmitter {
 		this._pidInterval = setInterval(() => this.refreshPidMap(deviceId), 30000);
 
 		// App lifecycle tracking for single-package mode
-		if (packages && packages.length === 1) {
-			const pkg = packages[0];
-			this._lastAppState = null;
-			this._appStateRunning = true;
-
-			const pollLoop = () => {
-				if (!this._appStateRunning) return;
-				this.getAppState(deviceId, pkg).then(state => {
-					if (state.state !== this._lastAppState) {
-						this._lastAppState = state.state;
-						this.emit('adbevent', {
-							type: 'adb.lifecycle',
-							data: { event: state.state, pkg, detail: `${state.state} (PID: ${state.pid || 'none'})` }
-						});
-					}
-					// Schedule next check after a short delay (serialized, no overlap)
-					if (this._appStateRunning) {
-						this._appStateTimeout = setTimeout(pollLoop, 100);
-					}
-				}).catch(() => {
-					if (this._appStateRunning) {
-						this._appStateTimeout = setTimeout(pollLoop, 500);
-					}
-				});
-			};
-			pollLoop();
-		}
+		this._startAppStatePolling(deviceId, packages);
 
 		// Always stream everything at Verbose — all filtering is client-side
 		// -T 1 = only new logs from now, avoids replaying old buffer on stop/start
@@ -523,6 +504,49 @@ class ADBService extends EventEmitter {
 		this._appStateRunning = false;
 		clearTimeout(this._appStateTimeout);
 		this._lastAppState = null;
+	}
+
+	_startAppStatePolling(deviceId, packages) {
+		// Cancel any prior poll loop
+		this._appStateRunning = false;
+		clearTimeout(this._appStateTimeout);
+		this._lastAppState = null;
+
+		if (!packages || packages.length !== 1) return;
+
+		const pkg = packages[0];
+		this._appStateRunning = true;
+
+		const pollLoop = () => {
+			if (!this._appStateRunning) return;
+			this.getAppState(deviceId, pkg).then(state => {
+				if (!this._appStateRunning) return;
+				if (state.state !== this._lastAppState) {
+					this._lastAppState = state.state;
+					this.emit('adbevent', {
+						type: 'adb.lifecycle',
+						data: { event: state.state, pkg, detail: `${state.state} (PID: ${state.pid || 'none'})` }
+					});
+				}
+				if (this._appStateRunning) {
+					this._appStateTimeout = setTimeout(pollLoop, 100);
+				}
+			}).catch(() => {
+				if (this._appStateRunning) {
+					this._appStateTimeout = setTimeout(pollLoop, 500);
+				}
+			});
+		};
+		pollLoop();
+	}
+
+	updatePackages(packages) {
+		if (!this.lastParams) return;
+		this.lastParams.packages = packages;
+		// If streaming, restart app-state polling against the new package set
+		if (this.logcatProcess) {
+			this._startAppStatePolling(this.lastParams.deviceId, packages);
+		}
 	}
 
 	async restart(params) {

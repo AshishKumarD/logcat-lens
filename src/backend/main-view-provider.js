@@ -49,6 +49,9 @@ module.exports = class MainViewProvider {
 					this.#paused = false;
 					await this.adb.restart(event.data);
 					break;
+				case 'update-packages':
+					this.adb.updatePackages(event.data.packages);
+					break;
 				case 'copy':
 					vsc.copyToClipboard(event.data.text);
 					break;
@@ -64,7 +67,14 @@ module.exports = class MainViewProvider {
 					this.adb.forceStopApp(event.data.deviceId, event.data.packageName).catch(() => {});
 					break;
 				case 'app-clear-data':
-					this.adb.clearAppData(event.data.deviceId, event.data.packageName).catch(() => {});
+					this.adb.clearAppData(event.data.deviceId, event.data.packageName).catch(err => {
+						const detail = (err?.message || '').trim();
+						const isPermBlock = /permission|denied|not allowed|SecurityException|monitor/i.test(detail);
+						const msg = isPermBlock
+							? `Couldn't clear app data for ${event.data.packageName}. This is usually caused by "Permission monitoring" in Developer Options — disable it on the device and try again.`
+							: `Couldn't clear app data for ${event.data.packageName}${detail ? `: ${detail}` : ''}.`;
+						vsc.showErrorPopup(msg);
+					});
 					break;
 				case 'devices':
 					this.adb.listDevices()
